@@ -137,3 +137,86 @@ jobs:
           docker buildx imagetools inspect "${IMAGE}:latest"
           echo "Pin a sandbox to this build with:"
           echo "  openshell sandbox create --from ${IMAGE}:${GITHUB_SHA::12} --policy ./sandboxes/compute/policy.yaml"
+
+  bump-pin:
+    name: open a PR bumping the pin
+    needs: merge
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@v4
+
+      # Pin to whichever tag this build wrote that will NOT move: the commit tag
+      # for a push, the dated tag for a scheduled or manual rebuild.
+      - name: Resolve the tag to pin
+        id: tag
+        run: |
+          set -euo pipefail
+          if [ "${{ github.event_name }}" = push ]; then
+            echo "tag=${GITHUB_SHA::12}" >> "$GITHUB_OUTPUT"
+          else
+            echo "tag=${GITHUB_SHA::12}-$(date -u +%Y%m%d)" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Rewrite the pin
+        id: edit
+        run: |
+          set -euo pipefail
+          new="${IMAGE}:${{ steps.tag.outputs.tag }}"
+          # python rather than sed: the line contains ${...} and $ escaping through
+          # YAML into sed is a reliable way to corrupt it.
+          python3 - "$new" <<'PY'
+          import re, sys
+          new = sys.argv[1]
+          p = 'aliases.sh'
+          s = open(p).read()
+          s2, n = re.subn(r'^OPENSHELL_IMAGE=.*$',
+                          'OPENSHELL_IMAGE="${OPENSHELL_IMAGE:-%s}"' % new,
+                          s, count=1, flags=re.M)
+          assert n == 1, "OPENSHELL_IMAGE line not found in aliases.sh"
+          open(p, 'w').write(s2)
+          PY
+          bash -n aliases.sh
+          if git diff --quiet aliases.sh; then
+            echo "pin already at $new; nothing to do"
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+            echo "new=$new" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Open or update the PR
+        if: steps.edit.outputs.changed == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          branch=chore/bump-image-pin
+          git config user.name  'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git checkout -B "$branch"
+          git commit -am "Bump the sandbox image pin to ${{ steps.tag.outputs.tag }}"
+          git push --force origin "$branch"
+          if gh pr view "$branch" --json state --jq .state 2>/dev/null | grep -qx OPEN; then
+            echo "PR already open; the force-push above updated it"
+          else
+            gh pr create --base main --head "$branch" \
+              --title "Bump the sandbox image pin to ${{ steps.tag.outputs.tag }}" \
+              --body-file - <<EOF
+          \`os\` pins a commit tag rather than \`:latest\`, so a tag that moves cannot
+          silently swap the image under a warm cache. The cost is that a newer build --
+          including the weekly rebuild that picks up a newer Claude Code -- only arrives
+          when the pin is bumped. This is that bump.
+
+          New pin: \`${{ steps.edit.outputs.new }}\`
+
+          Built by [run ${GITHUB_RUN_ID}](${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}), triggered by \`${{ github.event_name }}\`.
+
+          Merging changes nothing already running: a sandbox binds to its image at create
+          time, so existing sandboxes keep the image they were built from until they are
+          deleted and recreated.
+          EOF
+          fi
