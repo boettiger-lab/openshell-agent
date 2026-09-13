@@ -1,0 +1,168 @@
+# AGENT flavor of the compute sandbox policy -- same image, GitHub write added.
+#
+#   openshell sandbox create --from <image> --policy ./sandboxes/compute/policy-agent.yaml
+#
+# For a core agent that commits to its own repo and files issues on others, holding two
+# App installation tokens delivered as FILES (the geo-agent-ops #166 path), not as
+# provider placeholders. That distinction matters here: the one-credential-domain rule
+# -- overlapping endpoints on a host:port must agree on credential_binding -- applies
+# only to provider bindings. With tokens in files there is no binding, so two tokens
+# coexist in one sandbox and the separate policies below load without conflict.
+# Measured on openshell 0.0.116.
+#
+# WHAT THE PROXY STILL BUYS, AND WHAT IT DOES NOT
+#
+# It binds per BINARY, not per credential. `gh` and `git` get different rule sets and
+# those are enforced -- verified: with two policies on api.github.com:443, curl was
+# allowed POST /repos/**/issues and denied POST /markdown (403), while a second binary
+# restricted to GET was denied the same issues POST. So the shape of what each tool may
+# do is real.
+#
+# What it cannot do is tell WHICH token is in play. If the agent uses `gh` while the
+# code token is active, nothing here stops it. The App's own permissions remain the
+# primary boundary; this is a second, differently-shaped one.
+#
+# THE GRAPHQL COMPROMISE -- read this before tightening github_graphql
+#
+# `gh issue create` is GraphQL, not REST: it issues two POSTs to /graphql and touches no
+# REST path at all. So scoping `gh` by REST path does not constrain it -- gh simply gets
+# a 403 and fails.
+#
+# OpenShell's GraphQL matching is genuinely precise: allowing operation_type=query and a
+# single named mutation, a request naming that mutation returned 200 while a differently
+# named one and an anonymous mutation both returned 403, with
+# "GraphQL operation blocked by endpoint policy". So named allowlisting works.
+#
+# It does not work FOR gh. gh's issue-create mutation matched neither `CreateIssue` nor
+# `IssueCreate`, and anonymous mutations are denied, so the allowlist never admits it.
+# With operation_type=mutation allowed outright, gh works. That is the compromise below:
+# every mutation the token permits is reachable -- closing or editing others' issues
+# included -- and the real limit is the App's issues:write-with-no-contents grant.
+#
+# If that is too coarse, the alternative is REST: `gh api --method POST /repos/.../issues`
+# stays on paths github_rest narrows exactly. It costs the ergonomics of `gh issue create`
+# and buys back proxy-level scoping of writes.
+#
+# Everything else -- why every GitHub host is L7, the credential-domain rule, the
+# /opt read_only note -- is in policy.yaml and applies here unchanged.
+
+version: 1
+filesystem_policy:
+  include_workdir: true
+  read_only:
+  - /usr
+  - /lib
+  - /proc
+  - /dev/urandom
+  - /app
+  - /etc
+  - /var/log
+  - /opt
+  read_write:
+  - /sandbox
+  - /tmp
+  - /dev/null
+landlock:
+  compatibility: best_effort
+network_policies:
+  claude_code:
+    name: claude-code
+    binaries:
+    - path: /usr/local/bin/claude
+    - path: /usr/bin/node
+    - path: /usr/bin/claude
+    - path: /usr/lib/node_modules/@anthropic-ai/**
+    - path: /sandbox/.local/bin/claude
+    - path: /sandbox/.local/share/claude/**
+    endpoints:
+    - host: api.anthropic.com
+      port: 443
+      protocol: rest
+      access: full
+      enforcement: enforce
+    - host: statsig.anthropic.com
+      port: 443
+    - host: sentry.io
+      port: 443
+    - host: raw.githubusercontent.com
+      port: 443
+      protocol: rest
+      enforcement: enforce
+      rules:
+      - allow:
+          method: GET
+          path: '**'
+      - allow:
+          method: HEAD
+          path: '**'
+    - host: platform.claude.com
+      port: 443
+    - host: downloads.claude.ai
+      port: 443
+    - host: mcp-proxy.anthropic.com
+      port: 443
+    - host: registry.npmjs.org
+      port: 443
+  github_git:
+    name: github-git
+    binaries:
+    - path: /usr/bin/git
+    - path: /usr/bin/gh
+    endpoints:
+    - host: github.com
+      port: 443
+      protocol: rest
+      enforcement: enforce
+      rules:
+      - allow:
+          method: GET
+          path: '**'
+      - allow:
+          method: POST
+          path: /**/git-upload-pack
+      - allow:
+          method: POST
+          path: /**/git-receive-pack
+  github_rest:
+    name: github-rest
+    binaries:
+    - path: /usr/bin/gh
+    endpoints:
+    - host: api.github.com
+      port: 443
+      protocol: rest
+      enforcement: enforce
+      rules:
+      - allow:
+          method: GET
+          path: '**'
+      - allow:
+          method: POST
+          path: /repos/**/issues
+      - allow:
+          method: POST
+          path: /repos/**/issues/*/comments
+      - allow:
+          method: POST
+          path: /repos/**/pulls
+      deny_rules:
+      - path: /repos/**/git/refs/**
+        method: DELETE
+  github_graphql:
+    name: github-graphql
+    binaries:
+    - path: /usr/bin/gh
+    endpoints:
+    - host: api.github.com
+      port: 443
+      protocol: graphql
+      path: /graphql
+      enforcement: enforce
+      rules:
+      - allow:
+          operation_type: query
+      - allow:
+          operation_type: mutation
+process:
+  run_as_group: sandbox
+  run_as_user: sandbox
