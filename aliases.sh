@@ -44,7 +44,7 @@ OPENSHELL_AGENT_DIR="${OPENSHELL_AGENT_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")
 # that picks up a newer Claude Code):
 #   git log -1 --format=%h            # the tag CI wrote, 12 chars
 #   docker buildx imagetools inspect ghcr.io/boettiger-lab/openshell-agent/compute:latest
-OPENSHELL_IMAGE="${OPENSHELL_IMAGE:-ghcr.io/boettiger-lab/openshell-agent/compute:ae7d5032a613}"
+OPENSHELL_IMAGE="${OPENSHELL_IMAGE:-ghcr.io/boettiger-lab/openshell-agent/compute:66ed835c2753-20260914}"
 
 # Which sandboxes/<name>/ the POLICY comes from. Policy is independent of the image,
 # which is what lets one image carry both flavors.
